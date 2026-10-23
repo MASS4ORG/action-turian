@@ -1,0 +1,45 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Create a project
+        uses: ./
+        with:
+          args: new sample
+
+      - name: Compile it
+        uses: ./
+        with:
+          args: compile sample
+
+      - name: Export it
+        uses: ./
+        with:
+          args: export sample
+
+      - name: Render a screenshot
+        uses: ./
+        with:
+          args: screenshot sample --out screenshot.png
+
+      - name: Check the outputs
+        run: |
+          test -n "$(ls -A sample/Output)"
+          test -s screenshot.png
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: smoke
+          path: |
+            sample/Output/
+            screenshot.png

@@ -1,0 +1,69 @@
+name: Turian CLI
+description: Build, export and inspect Turian game projects and bricks headlessly with the Turian CLI container
+author: MASS4
+branding:
+  icon: box
+  color: purple
+
+inputs:
+  args:
+    description: Arguments for turian-cli, e.g. `export .`, `compile MyGame` or `brick restore --locked`
+    required: true
+  version:
+    description: Tag of the ghcr.io/mass4org/turian-cli image to run
+    default: latest
+  image:
+    description: Full image reference to run instead of the published one, e.g. one pinned by digest or built earlier in the job
+    default: ""
+  working-directory:
+    description: Folder, relative to the workspace, the CLI runs in
+    default: .
+
+outputs:
+  image:
+    description: The image that ran, pinned by digest, to run exactly the same CLI again
+    value: ${{ steps.run.outputs.image }}
+  version:
+    description: The Turian version of that image
+    value: ${{ steps.run.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    # The tag is resolved to a digest once and the CLI runs that digest, so the outputs and the job summary name the
+    # exact image even when `latest` moves. The workspace is mounted at the same path inside the container, so paths
+    # in args and in later steps agree. Inputs reach the script through env, never through expression interpolation.
+    - name: Run turian-cli
+      id: run
+      shell: bash
+      env:
+        TURIAN_ARGS: ${{ inputs.args }}
+        TURIAN_IMAGE: ${{ inputs.image != '' && inputs.image || format('ghcr.io/mass4org/turian-cli:{0}', inputs.version) }}
+        TURIAN_WORKDIR: ${{ inputs.working-directory }}
+      run: |
+        engine=$(command -v docker || command -v podman) || { echo "::error::Neither docker nor podman is available; use a Linux runner."; exit 1; }
+        # An image built earlier in the job has nothing to pull.
+        "$engine" pull -q "$TURIAN_IMAGE" > /dev/null || "$engine" image inspect "$TURIAN_IMAGE" > /dev/null
+        # The digest the requested repository knows the image by; an image built in the job has none.
+        repository="${TURIAN_IMAGE%%@*}"
+        [[ "${repository##*/}" != *:* ]] || repository="${repository%:*}"
+        pinned=$("$engine" image inspect --format '{{ range .RepoDigests }}{{ println . }}{{ end }}' "$TURIAN_IMAGE" \
+          | awk -v prefix="$repository@" 'index($0, prefix) == 1 { print; exit }')
+        image="${pinned:-$TURIAN_IMAGE}"
+        version=$("$engine" image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "$image")
+        echo "image=$image" >> "$GITHUB_OUTPUT"
+        echo "version=$version" >> "$GITHUB_OUTPUT"
+        echo "turian-cli $version: \`$image\`" >> "$GITHUB_STEP_SUMMARY"
+        args=()
+        eval "args=($TURIAN_ARGS)"
+        # Files the CLI writes belong to the runner user, so later steps can change and delete them.
+        user_args=(--user "$(id -u):$(id -g)" -e HOME=/tmp)
+        [[ "$engine" == *podman ]] && user_args+=(--userns=keep-id)
+        env_args=()
+        [ -n "${GAYA_BRICKS:-}" ] && env_args+=(-e "GAYA_BRICKS=$GAYA_BRICKS")
+        "$engine" run --rm \
+          "${user_args[@]}" \
+          -v "$GITHUB_WORKSPACE:$GITHUB_WORKSPACE" \
+          -w "$GITHUB_WORKSPACE/$TURIAN_WORKDIR" \
+          "${env_args[@]}" \
+          "$image" "${args[@]}"
